@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ptvcarbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn bot_web:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: DATA_DIR
+        value: /tmp/ptvcarbot-data
