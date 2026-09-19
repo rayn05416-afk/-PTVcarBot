@@ -21,8 +21,10 @@ from dotenv import load_dotenv
 BASE = Path(__file__).resolve().parent
 load_dotenv(BASE / ".env")
 
-# Render provides this automatically for Web Services.
-PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+# Render provides this automatically for Web 
+PUBLIC_URL = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").rstrip("/")
+if PUBLIC_URL and not PUBLIC_URL.startswith("http"):
+    PUBLIC_URL = "https://" + PUBLIC_URL
 TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "ptvcar-webhook-secret")
 PORT = int(os.getenv("PORT", "10000"))
