@@ -103,7 +103,71 @@ def plate_key(plate: str):
     return re.sub(r"\s+", "", plate)
 
 
-def ocr_image(path: Path):
+def odef ocr_image(path: Path):
+    img = cv2.imread(str(path))
+
+    if img is None:
+        return ""
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # تكبير الصورة لتحسين قراءة النص واللوحة
+    gray = cv2.resize(
+        gray,
+        None,
+        fx=3.0,
+        fy=3.0,
+        interpolation=cv2.INTER_CUBIC
+    )
+
+    # تحسين التباين
+    clahe = cv2.createCLAHE(
+        clipLimit=2.0,
+        tileGridSize=(8, 8)
+    )
+    gray = clahe.apply(gray)
+
+    # أكثر من نسخة للصورة
+    _, otsu = cv2.threshold(
+        gray,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    adaptive = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        11
+    )
+
+    variants = [
+        gray,
+        otsu,
+        adaptive
+    ]
+
+    texts = []
+
+    for candidate in variants:
+        for psm in (6, 11, 12):
+            try:
+                result = pytesseract.image_to_string(
+                    candidate,
+                    lang="ara+eng",
+                    config=f"--psm {psm}"
+                )
+
+                if result:
+                    texts.append(result)
+
+            except Exception as exc:
+                logger.warning("OCR failed: %s", exc)
+
+    return "\n".join(texts)
     img = cv2.imread(str(path))
     if img is None:
         return ""
@@ -120,12 +184,42 @@ def ocr_image(path: Path):
                 logger.warning("OCR failed: %s", exc)
     return "\n".join(texts)
 
-
 def classify_image(text: str):
-    if "رقم المحضر" in text and ("نوع المحضر" in text or "المخالفات" in text or "حالة المحضر" in text):
+    text = text or ""
+
+    # صورة التطبيق
+    app_words = (
+        "نوع المحضر",
+        "حالة المحضر",
+        "المخالفات",
+        "حالة الطلب",
+        "الإجراء",
+        "التطبيق"
+    )
+
+    if "رقم المحضر" in text and any(
+        word in text for word in app_words
+    ):
         return "app"
-    if "رقم المحضر" in text and ("اسم مستلم" in text or "رقم هوية المخالف" in text or "المحضر الورقي" in text):
+
+    # المحضر الورقي
+    paper_words = (
+        "اسم مستلم",
+        "رقم هوية المخالف",
+        "المحضر الورقي",
+        "بيانات المركبة",
+        "لوحة المركبة",
+        "نوع المركبة"
+    )
+
+    if any(word in text for word in paper_words):
         return "paper"
+
+    # إذا وجد رقم محضر ولا توجد علامات واضحة للتطبيق،
+    # نعتبرها مرشحًا للمحضر.
+    if extract_report_numbers(text):
+        return "paper"
+
     return "photo"
 
 
@@ -202,99 +296,231 @@ async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     folder = user_folder(uid)
+
     paths = sorted(folder.glob("*.jpg"))
+
     target = message_target(update)
+
     if not paths:
         if target:
             await target.reply_text("لا توجد صور لهذا اليوم.")
         return
 
     if target:
-        await target.reply_text("🔎 أفحص الصور وأطابق اللوحة ورقم المحضر...")
+        await target.reply_text(
+            "🔎 أفحص المحاضر وأقرأ اللوحات وأرقام المحاضر..."
+        )
 
     records = []
+
     for p in paths:
         text = await asyncio.to_thread(ocr_image, p)
+
         reports = extract_report_numbers(text)
         plate = normalize_plate_arabic(text)
         kind = classify_image(text)
-        records.append({"path": p, "text": text, "reports": reports, "plate": plate, "kind": kind})
 
-    # 1) Build plate anchors from paper/app/photo OCR.
-    by_plate = {}
-    for r in records:
-        key = plate_key(r["plate"])
-        if key:
-            by_plate.setdefault(key, []).append(r)
+        records.append({
+            "path": p,
+            "text": text,
+            "reports": reports,
+            "plate": plate,
+            "kind": kind
+        })
 
     created = []
     review = []
     used = set()
 
-    # 2) A valid report group must have a paper or a vehicle photo plate anchor.
-    #    App screenshot is then attached when its report number is present and
-    #    its plate matches the same vehicle. We never use the tow truck plate
-    #    as the primary key.
-    for key, items in by_plate.items():
-        paper_items = [x for x in items if x["kind"] == "paper"]
-        app_items = [x for x in items if x["kind"] == "app"]
-        photo_items = [x for x in items if x["kind"] == "photo"]
+    # -----------------------------------------
+    # 1) المحاضر هي نقطة البداية
+    # -----------------------------------------
 
-        # Require a paper anchor when possible. Photo-only plate matches are
-        # intentionally sent to review to avoid mixing vehicles.
-        if not paper_items:
-            review.extend(items)
+    papers = [
+        r for r in records
+        if r["kind"] == "paper"
+    ]
+
+    apps = [
+        r for r in records
+        if r["kind"] == "app"
+    ]
+
+    photos = [
+        r for r in records
+        if r["kind"] == "photo"
+    ]
+
+    # -----------------------------------------
+    # 2) معالجة كل محضر
+    # -----------------------------------------
+
+    for paper in papers:
+
+        plate = paper["plate"]
+
+        if not plate:
+            review.append(paper)
             continue
 
-        report_numbers = sorted({n for x in app_items + items for n in x["reports"]})
+        plate_k = plate_key(plate)
+
+        # رقم المحضر من الورقي إن وجد
+        report_numbers = list(paper["reports"])
+
+        # -----------------------------------------
+        # 3) البحث عن التطبيق بواسطة رقم المحضر
+        # -----------------------------------------
+
+        matching_apps = []
+
+        for app_item in apps:
+
+            if str(app_item["path"]) in used:
+                continue
+
+            if not report_numbers:
+                continue
+
+            if any(
+                number in app_item["reports"]
+                for number in report_numbers
+            ):
+                matching_apps.append(app_item)
+
+        # -----------------------------------------
+        # 4) إذا لم يوجد رقم في الورقي
+        # نبحث عن تطبيق يحتوي لوحة المركبة
+        # -----------------------------------------
+
         if not report_numbers:
-            review.extend(items)
-            continue
 
-        # If more than one report number is tied to the same plate, don't guess.
+            for app_item in apps:
+
+                if str(app_item["path"]) in used:
+                    continue
+
+                if plate_key(app_item["plate"]) == plate_k:
+
+                    report_numbers.extend(
+                        app_item["reports"]
+                    )
+
+                    if report_numbers:
+                        matching_apps.append(app_item)
+                        break
+
+        # يجب أن يكون لدينا رقم محضر واحد
+        report_numbers = sorted(set(report_numbers))
+
         if len(report_numbers) != 1:
-            review.extend(items)
+            review.append(paper)
             continue
 
         report = report_numbers[0]
-        unique = []
-        seen = set()
-        for x in items:
-            path_key = str(x["path"])
-            if path_key not in seen:
-                seen.add(path_key)
-                unique.append(x)
-                used.add(path_key)
 
-        # Desired order: paper -> vehicle/tow photo -> app screenshot.
-        order = {"paper": 0, "photo": 1, "app": 2}
-        unique.sort(key=lambda x: order.get(x["kind"], 3))
-        pdf = make_pdf(uid, report, paper_items[0]["plate"], [x["path"] for x in unique])
-        created.append(pdf)
+        # -----------------------------------------
+        # 5) البحث عن صورة المركبة بواسطة اللوحة
+        # -----------------------------------------
 
-    # Anything not confidently grouped goes to review.
-    for r in records:
-        if str(r["path"]) not in used and r not in review:
-            review.append(r)
+        matching_photos = []
 
-    for pdf in created:
-        with open(pdf, "rb") as f:
-            if target:
-                await target.reply_document(document=f, filename=pdf.name)
+        for photo in photos:
 
-    if created and target:
-        await target.reply_text(f"✅ تم إنشاء {len(created)} ملف PDF.")
+            if str(photo["path"]) in used:
+                continue
 
-    if review and target:
-        await target.reply_text(
-            f"⚠️ {len(review)} صورة لم أستطع ربطها بثقة.\n"
-            "لم أخمّن اللوحة أو رقم المحضر. هذه تحتاج مراجعة يدوية."
+            if plate_key(photo["plate"]) == plate_k:
+                matching_photos.append(photo)
+
+        # -----------------------------------------
+        # 6) تجهيز الصور
+        # المحضر -> المركبة -> التطبيق
+        # -----------------------------------------
+
+        group = [paper]
+
+        group.extend(matching_photos)
+
+        group.extend(matching_apps)
+
+        # -----------------------------------------
+        # 7) إنشاء PDF
+        # -----------------------------------------
+
+        pdf = make_pdf(
+            uid,
+            report,
+            plate,
+            [x["path"] for x in group]
         )
 
-    # Clear today's queue only after sending results.
+        created.append(pdf)
+
+        # تسجيل الصور المستخدمة
+        for item in group:
+            used.add(str(item["path"]))
+
+    # -----------------------------------------
+    # 8) أي صورة لم تستخدم تذهب للمراجعة
+    # -----------------------------------------
+
+    for record in records:
+
+        path_key = str(record["path"])
+
+        if path_key not in used:
+            review.append(record)
+
+    # إزالة التكرار
+    unique_review = []
+    review_paths = set()
+
+    for item in review:
+
+        key = str(item["path"])
+
+        if key not in review_paths:
+            review_paths.add(key)
+            unique_review.append(item)
+
+    # -----------------------------------------
+    # 9) إرسال ملفات PDF
+    # -----------------------------------------
+
+    for pdf in created:
+
+        with open(pdf, "rb") as f:
+
+            if target:
+                await target.reply_document(
+                    document=f,
+                    filename=pdf.name
+                )
+
+    if created and target:
+
+        await target.reply_text(
+            f"✅ تم إنشاء {len(created)} ملف PDF."
+        )
+
+    # -----------------------------------------
+    # 10) الصور غير المطابقة
+    # -----------------------------------------
+
+    if unique_review and target:
+
+        await target.reply_text(
+            f"⚠️ {len(unique_review)} صورة تحتاج مراجعة.\n\n"
+            "لم أقم بالتخمين في اللوحة أو رقم المحضر."
+        )
+
+    # -----------------------------------------
+    # 11) تنظيف صور اليوم بعد انتهاء الفرز
+    # -----------------------------------------
+
     shutil.rmtree(folder, ignore_errors=True)
     folder.mkdir(parents=True, exist_ok=True)
-
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
