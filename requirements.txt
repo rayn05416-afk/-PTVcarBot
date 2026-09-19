@@ -7,3 +7,4 @@ pytesseract>=0.3.13
 opencv-python-headless>=4.10
 rapidfuzz>=3.9
 python-dotenv>=1.0
+ultralytics
