@@ -103,7 +103,7 @@ def plate_key(plate: str):
     return re.sub(r"\s+", "", plate)
 
 
-def odef ocr_image(path: Path):
+def ocr_image(path: Path):
     img = cv2.imread(str(path))
 
     if img is None:
