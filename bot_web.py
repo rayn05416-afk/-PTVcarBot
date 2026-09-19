@@ -104,6 +104,165 @@ def plate_key(plate: str):
 
 
 def ocr_image(path: Path):
+
+    img = cv2.imread(str(path))
+
+    if img is None:
+        return ""
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # تكبير الصورة
+    gray = cv2.resize(
+        gray,
+        None,
+        fx=3.0,
+        fy=3.0,
+        interpolation=cv2.INTER_CUBIC
+    )
+
+    # تحسين الصورة
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    _, th = cv2.threshold(
+        gray,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    texts = []
+
+    for candidate in (gray, th):
+
+        for psm in (6, 7, 11, 12):
+
+            try:
+
+                result = pytesseract.image_to_string(
+                    candidate,
+                    lang="ara+eng",
+                    config=f"--psm {psm}"
+                )
+
+                if result:
+                    texts.append(result)
+
+            except Exception as exc:
+
+                logger.warning(
+                    "OCR failed: %s",
+                    exc
+                )
+
+    return "\n".join(texts)
+
+
+def vehicle_plate_ocr(path: Path):
+
+    img = cv2.imread(str(path))
+
+    if img is None:
+        return ""
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # تكبير الصورة
+    gray = cv2.resize(
+        gray,
+        None,
+        fx=3.0,
+        fy=3.0,
+        interpolation=cv2.INTER_CUBIC
+    )
+
+    # استخراج الحواف
+    blur = cv2.GaussianBlur(
+        gray,
+        (5, 5),
+        0
+    )
+
+    edges = cv2.Canny(
+        blur,
+        50,
+        150
+    )
+
+    contours, _ = cv2.findContours(
+        edges,
+        cv2.RETR_LIST,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    candidates = []
+
+    for contour in contours:
+
+        x, y, w, h = cv2.boundingRect(contour)
+
+        if h <= 0:
+            continue
+
+        ratio = w / float(h)
+        area = w * h
+
+        # لوحة السيارة غالبًا مستطيلة
+        if 1.5 <= ratio <= 6.0 and area > 1500:
+
+            candidates.append(
+                (area, x, y, w, h)
+            )
+
+    # الأكبر أولاً
+    candidates.sort(
+        reverse=True
+    )
+
+    texts = []
+
+    # نجرب أفضل المناطق المرشحة
+    for _, x, y, w, h in candidates[:15]:
+
+        crop = gray[
+            y:y + h,
+            x:x + w
+        ]
+
+        if crop.size == 0:
+            continue
+
+        _, threshold = cv2.threshold(
+            crop,
+            0,
+            255,
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+
+        for candidate in (
+            crop,
+            threshold
+        ):
+
+            try:
+
+                result = pytesseract.image_to_string(
+                    candidate,
+                    lang="ara+eng",
+                    config="--psm 7"
+                )
+
+                if result:
+                    texts.append(result)
+
+            except Exception as exc:
+
+                logger.warning(
+                    "Vehicle plate OCR failed: %s",
+                    exc
+                )
+
+    return "\n".join(texts)
     img = cv2.imread(str(path))
 
     if img is None:
