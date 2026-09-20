@@ -453,7 +453,7 @@ async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ تم حفظ الصورة. أرسل الباقي بأي ترتيب.")
 
 
-async async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     folder = user_folder(uid)
 
