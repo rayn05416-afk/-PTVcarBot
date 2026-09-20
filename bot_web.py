@@ -453,7 +453,289 @@ async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ تم حفظ الصورة. أرسل الباقي بأي ترتيب.")
 
 
-async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    folder = user_folder(uid)
+
+    paths = sorted(folder.glob("*.jpg"))
+    target = message_target(update)
+
+    if not paths:
+        if target:
+            await target.reply_text("لا توجد صور لهذا اليوم.")
+        return
+
+    if target:
+        await target.reply_text(
+            "🔎 أفحص الصور وأطابق رقم المحضر واللوحة..."
+        )
+
+    records = []
+
+    # =========================================
+    # 1) قراءة جميع الصور
+    # =========================================
+
+    for p in paths:
+
+        text = await asyncio.to_thread(ocr_image, p)
+
+        reports = extract_report_numbers(text)
+        plate = normalize_plate_arabic(text)
+        kind = classify_image(text)
+
+        records.append({
+            "path": p,
+            "text": text,
+            "reports": reports,
+            "plate": plate,
+            "kind": kind
+        })
+
+    # =========================================
+    # 2) تقسيم الصور
+    # =========================================
+
+    apps = [
+        r for r in records
+        if r["kind"] == "app"
+    ]
+
+    papers = [
+        r for r in records
+        if r["kind"] == "paper"
+    ]
+
+    photos = [
+        r for r in records
+        if r["kind"] == "photo"
+    ]
+
+    created = []
+    used = set()
+    review = []
+
+    # =========================================
+    # 3) صورة التطبيق هي نقطة البداية
+    # رقم المحضر = 8 أرقام
+    # =========================================
+
+    for app_item in apps:
+
+        app_reports = app_item["reports"]
+
+        if len(app_reports) == 0:
+            review.append(app_item)
+            continue
+
+        # نستخدم رقم محضر واحد فقط
+        report = app_reports[0]
+
+        # =====================================
+        # 4) البحث عن المحضر الورقي
+        # أولاً: نفس رقم المحضر 8 أرقام
+        # =====================================
+
+        matching_papers = []
+
+        for paper in papers:
+
+            if str(paper["path"]) in used:
+                continue
+
+            if report in paper["reports"]:
+                matching_papers.append(paper)
+
+        # =====================================
+        # 5) إذا لم نجد الرقم في المحضر الورقي
+        # نستخدم لوحة المركبة كاحتياط
+        # =====================================
+
+        if not matching_papers and app_item["plate"]:
+
+            app_plate_key = plate_key(app_item["plate"])
+
+            for paper in papers:
+
+                if str(paper["path"]) in used:
+                    continue
+
+                if not paper["plate"]:
+                    continue
+
+                if plate_key(paper["plate"]) == app_plate_key:
+                    matching_papers.append(paper)
+
+        # لا يوجد محضر ورقي مؤكد
+        if not matching_papers:
+
+            review.append(app_item)
+            continue
+
+        # =====================================
+        # 6) اختيار المحضر الورقي
+        # =====================================
+
+        paper = matching_papers[0]
+
+        # =====================================
+        # 7) تحديد لوحة المركبة
+        # الأفضل من المحضر الورقي
+        # =====================================
+
+        plate = paper["plate"]
+
+        if not plate:
+            plate = app_item["plate"]
+
+        if not plate:
+
+            review.append(paper)
+            review.append(app_item)
+
+            continue
+
+        plate_k = plate_key(plate)
+
+        # =====================================
+        # 8) البحث عن صورة السطحة
+        # بنفس لوحة المركبة
+        # =====================================
+
+        matching_photos = []
+
+        for photo in photos:
+
+            if str(photo["path"]) in used:
+                continue
+
+            if not photo["plate"]:
+                continue
+
+            if plate_key(photo["plate"]) == plate_k:
+                matching_photos.append(photo)
+
+        # =====================================
+        # 9) إذا لم نجد السطحة
+        # ننشئ PDF للمحضر + التطبيق
+        # ونضع السطحة للمراجعة
+        # =====================================
+
+        group = [
+            paper
+        ]
+
+        group.extend(matching_photos)
+
+        group.append(app_item)
+
+        # =====================================
+        # 10) إنشاء PDF
+        # الترتيب:
+        # المحضر → السطحة → التطبيق
+        # =====================================
+
+        pdf = make_pdf(
+            uid,
+            report,
+            plate,
+            [item["path"] for item in group]
+        )
+
+        created.append(pdf)
+
+        # =====================================
+        # 11) تسجيل الصور المستخدمة
+        # =====================================
+
+        for item in group:
+            used.add(str(item["path"]))
+
+    # =========================================
+    # 12) أي صورة لم تستخدم = تحتاج مراجعة
+    # =========================================
+
+    for record in records:
+
+        key = str(record["path"])
+
+        if key not in used:
+            review.append(record)
+
+    # =========================================
+    # 13) إزالة التكرار من المراجعة
+    # =========================================
+
+    unique_review = []
+    review_paths = set()
+
+    for item in review:
+
+        key = str(item["path"])
+
+        if key not in review_paths:
+
+            review_paths.add(key)
+            unique_review.append(item)
+
+    # =========================================
+    # 14) إرسال ملفات PDF
+    # =========================================
+
+    for pdf in created:
+
+        try:
+
+            with open(pdf, "rb") as f:
+
+                if target:
+
+                    await target.reply_document(
+                        document=f,
+                        filename=pdf.name
+                    )
+
+        except Exception as exc:
+
+            logger.exception(
+                "PDF send failed: %s",
+                exc
+            )
+
+    # =========================================
+    # 15) رسالة النتيجة
+    # =========================================
+
+    if created and target:
+
+        await target.reply_text(
+            f"✅ تم إنشاء {len(created)} ملف PDF."
+        )
+
+    elif not created and target:
+
+        await target.reply_text(
+            "⚠️ لم أستطع إنشاء PDF مؤكد. "
+            "تحقق من رقم المحضر واللوحة."
+        )
+
+    # =========================================
+    # 16) الصور التي تحتاج مراجعة
+    # =========================================
+
+    if unique_review and target:
+
+        await target.reply_text(
+            f"⚠️ {len(unique_review)} صورة تحتاج مراجعة.\n\n"
+            "لم أقم بالتخمين في رقم المحضر أو لوحة المركبة."
+        )
+
+    # =========================================
+    # 17) تنظيف صور اليوم
+    # =========================================
+
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True, exist_ok=True)
     uid = update.effective_user.id
     folder = user_folder(uid)
 
