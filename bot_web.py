@@ -664,7 +664,7 @@ async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif not created and target:
 
-    details = []
+        details = []
 
     for i, r in enumerate(records, 1):
         reports_text = ", ".join(r["reports"]) if r["reports"] else "غير مقروء"
@@ -681,17 +681,6 @@ async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔎 هذه هي البيانات التي قرأها البوت:\n\n"
         + "\n\n".join(details)
     )
-
-    # =========================================
-    # 14) الصور التي تحتاج مراجعة
-    # =========================================
-    if unique_review and target:
-
-        await target.reply_text(
-            f"⚠️ {len(unique_review)} صورة تحتاج مراجعة.\n\n"
-            "لم أقم بالتخمين في رقم المحضر أو لوحة المركبة."
-        )
-
     # =========================================
     # 15) تنظيف صور اليوم
     # =========================================
