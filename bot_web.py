@@ -452,11 +452,9 @@ async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await tg_file.download_to_drive(custom_path=str(path))
     await update.message.reply_text("✅ تم حفظ الصورة. أرسل الباقي بأي ترتيب.")
 
-
-async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     folder = user_folder(uid)
-
     paths = sorted(folder.glob("*.jpg"))
     target = message_target(update)
 
@@ -475,10 +473,12 @@ async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # =========================================
     # 1) قراءة جميع الصور
     # =========================================
-
     for p in paths:
-
-        text = await asyncio.to_thread(ocr_image, p)
+        try:
+            text = await asyncio.to_thread(ocr_image, p)
+        except Exception as exc:
+            logger.warning("OCR failed for %s: %s", p, exc)
+            text = ""
 
         reports = extract_report_numbers(text)
         plate = normalize_plate_arabic(text)
@@ -495,47 +495,37 @@ async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # =========================================
     # 2) تقسيم الصور
     # =========================================
-
-    apps = [
-        r for r in records
-        if r["kind"] == "app"
-    ]
-
-    papers = [
-        r for r in records
-        if r["kind"] == "paper"
-    ]
-
-    photos = [
-        r for r in records
-        if r["kind"] == "photo"
-    ]
+    apps = [r for r in records if r["kind"] == "app"]
+    papers = [r for r in records if r["kind"] == "paper"]
+    photos = [r for r in records if r["kind"] == "photo"]
 
     created = []
-    used = set()
     review = []
+    used = set()
 
     # =========================================
-    # 3) صورة التطبيق هي نقطة البداية
-    # رقم المحضر = 8 أرقام
+    # 3) التطبيق هو نقطة البداية
+    #    رقم المحضر = 8 أرقام
     # =========================================
-
     for app_item in apps:
 
         app_reports = app_item["reports"]
 
-        if len(app_reports) == 0:
+        if not app_reports:
             review.append(app_item)
             continue
 
-        # نستخدم رقم محضر واحد فقط
+        # نحتاج رقم محضر واحد فقط
+        if len(app_reports) != 1:
+            review.append(app_item)
+            continue
+
         report = app_reports[0]
 
         # =====================================
         # 4) البحث عن المحضر الورقي
-        # أولاً: نفس رقم المحضر 8 أرقام
+        #    بالتطابق الكامل لرقم المحضر
         # =====================================
-
         matching_papers = []
 
         for paper in papers:
@@ -546,62 +536,35 @@ async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if report in paper["reports"]:
                 matching_papers.append(paper)
 
-        # =====================================
-        # 5) إذا لم نجد الرقم في المحضر الورقي
-        # نستخدم لوحة المركبة كاحتياط
-        # =====================================
-
-        if not matching_papers and app_item["plate"]:
-
-            app_plate_key = plate_key(app_item["plate"])
-
-            for paper in papers:
-
-                if str(paper["path"]) in used:
-                    continue
-
-                if not paper["plate"]:
-                    continue
-
-                if plate_key(paper["plate"]) == app_plate_key:
-                    matching_papers.append(paper)
-
-        # لا يوجد محضر ورقي مؤكد
-        if not matching_papers:
-
+        # يجب أن يكون هناك محضر ورقي واحد فقط
+        if len(matching_papers) != 1:
             review.append(app_item)
+            review.extend(matching_papers)
             continue
-
-        # =====================================
-        # 6) اختيار المحضر الورقي
-        # =====================================
 
         paper = matching_papers[0]
 
         # =====================================
-        # 7) تحديد لوحة المركبة
-        # الأفضل من المحضر الورقي
+        # 5) استخراج لوحة المركبة من المحضر
         # =====================================
-
         plate = paper["plate"]
 
+        # إذا لم يجد اللوحة في المحضر
+        # نحاول أخذها من صورة التطبيق
         if not plate:
             plate = app_item["plate"]
 
         if not plate:
-
             review.append(paper)
             review.append(app_item)
-
             continue
 
         plate_k = plate_key(plate)
 
         # =====================================
-        # 8) البحث عن صورة السطحة
-        # بنفس لوحة المركبة
+        # 6) البحث عن صورة المركبة فوق السطحة
+        #    بنفس لوحة المركبة
         # =====================================
-
         matching_photos = []
 
         for photo in photos:
@@ -616,25 +579,20 @@ async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 matching_photos.append(photo)
 
         # =====================================
-        # 9) إذا لم نجد السطحة
-        # ننشئ PDF للمحضر + التطبيق
-        # ونضع السطحة للمراجعة
+        # 7) ترتيب PDF
+        #    المحضر الورقي
+        #    ثم السطحة
+        #    ثم صورة التطبيق
         # =====================================
-
-        group = [
-            paper
-        ]
+        group = [paper]
 
         group.extend(matching_photos)
 
         group.append(app_item)
 
         # =====================================
-        # 10) إنشاء PDF
-        # الترتيب:
-        # المحضر → السطحة → التطبيق
+        # 8) إنشاء PDF
         # =====================================
-
         pdf = make_pdf(
             uid,
             report,
@@ -645,16 +603,15 @@ async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
         created.append(pdf)
 
         # =====================================
-        # 11) تسجيل الصور المستخدمة
+        # 9) تسجيل الصور المستخدمة
         # =====================================
-
         for item in group:
             used.add(str(item["path"]))
 
     # =========================================
-    # 12) أي صورة لم تستخدم = تحتاج مراجعة
+    # 10) الصور التي لم تستخدم
+    #     تحتاج مراجعة
     # =========================================
-
     for record in records:
 
         key = str(record["path"])
@@ -663,9 +620,8 @@ async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
             review.append(record)
 
     # =========================================
-    # 13) إزالة التكرار من المراجعة
+    # 11) إزالة التكرار من المراجعة
     # =========================================
-
     unique_review = []
     review_paths = set()
 
@@ -674,38 +630,32 @@ async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
         key = str(item["path"])
 
         if key not in review_paths:
-
             review_paths.add(key)
             unique_review.append(item)
 
     # =========================================
-    # 14) إرسال ملفات PDF
+    # 12) إرسال ملفات PDF
     # =========================================
-
     for pdf in created:
 
         try:
-
             with open(pdf, "rb") as f:
 
                 if target:
-
                     await target.reply_document(
                         document=f,
                         filename=pdf.name
                     )
 
         except Exception as exc:
-
             logger.exception(
                 "PDF send failed: %s",
                 exc
             )
 
     # =========================================
-    # 15) رسالة النتيجة
+    # 13) رسالة النتيجة
     # =========================================
-
     if created and target:
 
         await target.reply_text(
@@ -715,14 +665,13 @@ async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif not created and target:
 
         await target.reply_text(
-            "⚠️ لم أستطع إنشاء PDF مؤكد. "
+            "⚠️ لم أستطع إنشاء PDF مؤكد.\n"
             "تحقق من رقم المحضر واللوحة."
         )
 
     # =========================================
-    # 16) الصور التي تحتاج مراجعة
+    # 14) الصور التي تحتاج مراجعة
     # =========================================
-
     if unique_review and target:
 
         await target.reply_text(
@@ -731,239 +680,10 @@ async  def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # =========================================
-    # 17) تنظيف صور اليوم
+    # 15) تنظيف صور اليوم
     # =========================================
-
     shutil.rmtree(folder, ignore_errors=True)
     folder.mkdir(parents=True, exist_ok=True)
-    uid = update.effective_user.id
-    folder = user_folder(uid)
-
-    paths = sorted(folder.glob("*.jpg"))
-
-    target = message_target(update)
-
-    if not paths:
-        if target:
-            await target.reply_text("لا توجد صور لهذا اليوم.")
-        return
-
-    if target:
-        await target.reply_text(
-            "🔎 أفحص المحاضر وأقرأ اللوحات وأرقام المحاضر..."
-        )
-
-    records = []
-
-    for p in paths:
-        text = await asyncio.to_thread(ocr_image, p)
-
-        reports = extract_report_numbers(text)
-        plate = normalize_plate_arabic(text)
-        kind = classify_image(text)
-
-        records.append({
-            "path": p,
-            "text": text,
-            "reports": reports,
-            "plate": plate,
-            "kind": kind
-        })
-
-    created = []
-    review = []
-    used = set()
-
-    # -----------------------------------------
-    # 1) المحاضر هي نقطة البداية
-    # -----------------------------------------
-
-    papers = [
-        r for r in records
-        if r["kind"] == "paper"
-    ]
-
-    apps = [
-        r for r in records
-        if r["kind"] == "app"
-    ]
-
-    photos = [
-        r for r in records
-        if r["kind"] == "photo"
-    ]
-
-    # -----------------------------------------
-    # 2) معالجة كل محضر
-    # -----------------------------------------
-
-    for paper in papers:
-
-        plate = paper["plate"]
-
-        if not plate:
-            review.append(paper)
-            continue
-
-        plate_k = plate_key(plate)
-
-        # رقم المحضر من الورقي إن وجد
-        report_numbers = list(paper["reports"])
-
-        # -----------------------------------------
-        # 3) البحث عن التطبيق بواسطة رقم المحضر
-        # -----------------------------------------
-
-        matching_apps = []
-
-        for app_item in apps:
-
-            if str(app_item["path"]) in used:
-                continue
-
-            if not report_numbers:
-                continue
-
-            if any(
-                number in app_item["reports"]
-                for number in report_numbers
-            ):
-                matching_apps.append(app_item)
-
-        # -----------------------------------------
-        # 4) إذا لم يوجد رقم في الورقي
-        # نبحث عن تطبيق يحتوي لوحة المركبة
-        # -----------------------------------------
-
-        if not report_numbers:
-
-            for app_item in apps:
-
-                if str(app_item["path"]) in used:
-                    continue
-
-                if plate_key(app_item["plate"]) == plate_k:
-
-                    report_numbers.extend(
-                        app_item["reports"]
-                    )
-
-                    if report_numbers:
-                        matching_apps.append(app_item)
-                        break
-
-        # يجب أن يكون لدينا رقم محضر واحد
-        report_numbers = sorted(set(report_numbers))
-
-        if len(report_numbers) != 1:
-            review.append(paper)
-            continue
-
-        report = report_numbers[0]
-
-        # -----------------------------------------
-        # 5) البحث عن صورة المركبة بواسطة اللوحة
-        # -----------------------------------------
-
-        matching_photos = []
-
-        for photo in photos:
-
-            if str(photo["path"]) in used:
-                continue
-
-            if plate_key(photo["plate"]) == plate_k:
-                matching_photos.append(photo)
-
-        # -----------------------------------------
-        # 6) تجهيز الصور
-        # المحضر -> المركبة -> التطبيق
-        # -----------------------------------------
-
-        group = [paper]
-
-        group.extend(matching_photos)
-
-        group.extend(matching_apps)
-
-        # -----------------------------------------
-        # 7) إنشاء PDF
-        # -----------------------------------------
-
-        pdf = make_pdf(
-            uid,
-            report,
-            plate,
-            [x["path"] for x in group]
-        )
-
-        created.append(pdf)
-
-        # تسجيل الصور المستخدمة
-        for item in group:
-            used.add(str(item["path"]))
-
-    # -----------------------------------------
-    # 8) أي صورة لم تستخدم تذهب للمراجعة
-    # -----------------------------------------
-
-    for record in records:
-
-        path_key = str(record["path"])
-
-        if path_key not in used:
-            review.append(record)
-
-    # إزالة التكرار
-    unique_review = []
-    review_paths = set()
-
-    for item in review:
-
-        key = str(item["path"])
-
-        if key not in review_paths:
-            review_paths.add(key)
-            unique_review.append(item)
-
-    # -----------------------------------------
-    # 9) إرسال ملفات PDF
-    # -----------------------------------------
-
-    for pdf in created:
-
-        with open(pdf, "rb") as f:
-
-            if target:
-                await target.reply_document(
-                    document=f,
-                    filename=pdf.name
-                )
-
-    if created and target:
-
-        await target.reply_text(
-            f"✅ تم إنشاء {len(created)} ملف PDF."
-        )
-
-    # -----------------------------------------
-    # 10) الصور غير المطابقة
-    # -----------------------------------------
-
-    if unique_review and target:
-
-        await target.reply_text(
-            f"⚠️ {len(unique_review)} صورة تحتاج مراجعة.\n\n"
-            "لم أقم بالتخمين في اللوحة أو رقم المحضر."
-        )
-
-    # -----------------------------------------
-    # 11) تنظيف صور اليوم بعد انتهاء الفرز
-    # -----------------------------------------
-
-    shutil.rmtree(folder, ignore_errors=True)
-    folder.mkdir(parents=True, exist_ok=True)
-
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     folder = user_folder(uid)
