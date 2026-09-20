@@ -347,38 +347,47 @@ def vehicle_plate_ocr(path: Path):
 def classify_image(text: str):
     text = text or ""
 
-    # صورة التطبيق
-    app_words = (
+    # توحيد المسافات حتى يتحمل اختلاف OCR
+    normalized = " ".join(text.split())
+
+    # كلمات مميزة لصورة التطبيق
+    app_words = [
+        "رقم المحضر",
         "نوع المحضر",
         "حالة المحضر",
         "المخالفات",
         "حالة الطلب",
         "الإجراء",
-        "التطبيق"
-    )
+        "التطبيق",
+    ]
 
-    if "رقم المحضر" in text and any(
-        word in text for word in app_words
-    ):
-        return "app"
-
-    # المحضر الورقي
-    paper_words = (
+    # كلمات مميزة للمحضر الورقي
+    paper_words = [
         "اسم مستلم",
         "رقم هوية المخالف",
         "المحضر الورقي",
         "بيانات المركبة",
         "لوحة المركبة",
-        "نوع المركبة"
-    )
+        "نوع المركبة",
+    ]
 
-    if any(word in text for word in paper_words):
+    # إذا ظهرت عدة علامات من التطبيق
+    app_score = sum(1 for word in app_words if word in normalized)
+
+    # إذا ظهرت عدة علامات من المحضر الورقي
+    paper_score = sum(1 for word in paper_words if word in normalized)
+
+    if app_score >= 2:
+        return "app"
+
+    if paper_score >= 1:
         return "paper"
 
-    # إذا وجد رقم محضر ولا توجد علامات واضحة للتطبيق،
-    # نعتبرها مرشحًا للمحضر.
+    # وجود رقم محضر 8 أرقام يرجح أنه محضر
     if extract_report_numbers(text):
         return "paper"
+
+    return "photo"
 
     return "photo"
 
