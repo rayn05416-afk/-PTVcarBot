@@ -664,10 +664,23 @@ async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif not created and target:
 
-        await target.reply_text(
-            "⚠️ لم أستطع إنشاء PDF مؤكد.\n"
-            "تحقق من رقم المحضر واللوحة."
+    details = []
+
+    for i, r in enumerate(records, 1):
+        reports_text = ", ".join(r["reports"]) if r["reports"] else "غير مقروء"
+        plate_text = r["plate"] if r["plate"] else "غير مقروء"
+
+        details.append(
+            f"{i}) النوع: {r['kind']}\n"
+            f"   رقم المحضر: {reports_text}\n"
+            f"   اللوحة: {plate_text}"
         )
+
+    await target.reply_text(
+        "⚠️ لم أستطع إنشاء PDF.\n\n"
+        "🔎 هذه هي البيانات التي قرأها البوت:\n\n"
+        + "\n\n".join(details)
+    )
 
     # =========================================
     # 14) الصور التي تحتاج مراجعة
