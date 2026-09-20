@@ -8,6 +8,7 @@ from datetime import datetime
 
 import cv2
 import pytesseract
+from ultralytics import YOLO
 from PIL import Image
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
